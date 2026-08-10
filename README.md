@@ -141,8 +141,6 @@
 
 ## Star History
 
-## Star History
-
 [![Star History Chart](https://api.star-history.com/chart?repos=xjw580/Hearthstone-Script&type=date&legend=top-left&sealed_token=RqWpd09k4dz6JbePwzM3UArN4IeUrfZNHUNPnAqF9E4Yfpy-oBP99q98TFSSJtumR3lIL2ta4kRnI3PCx3XRewz6oprMrSZMVhTCGtiboC6oFHqux-dCaw)](https://www.star-history.com/?type=date&repos=xjw580%2FHearthstone-Script)
 
 
