@@ -1,0 +1,58 @@
+package club.xiaojiawei.hsscript.strategy.phase
+
+import club.xiaojiawei.hsscript.bean.ChangeCardThread
+import club.xiaojiawei.hsscript.bean.log.TagChangeEntity
+import club.xiaojiawei.hsscript.bean.single.WarEx
+import club.xiaojiawei.hsscript.enums.ConfigEnum
+import club.xiaojiawei.hsscript.enums.MulliganStateEnum
+import club.xiaojiawei.hsscript.enums.TagEnum
+import club.xiaojiawei.hsscript.strategy.AbstractPhaseStrategy
+import club.xiaojiawei.hsscript.strategy.DeckStrategyActuator.changeCard
+import club.xiaojiawei.hsscript.utils.ConfigUtil
+import club.xiaojiawei.hsscript.utils.GameUtil
+import club.xiaojiawei.hsscriptbase.enums.StepEnum
+import club.xiaojiawei.hsscriptbase.enums.WarPhaseEnum
+import club.xiaojiawei.kt.config.log
+
+/**
+ * 换牌阶段
+ *
+ * @author 肖嘉威
+ * @date 2022/11/26 17:24
+ */
+object ReplaceCardPhaseStrategy : AbstractPhaseStrategy() {
+
+    override fun dealTagChangeThenIsOver(line: String, tagChangeEntity: TagChangeEntity): Boolean {
+        if (tagChangeEntity.tag === TagEnum.MULLIGAN_STATE && tagChangeEntity.value == MulliganStateEnum.INPUT.name) {
+            val gameId = tagChangeEntity.entity
+            val me = war.me
+            val rival = war.rival
+            if (me.gameId == gameId || (rival.gameId.isNotBlank() && rival.gameId != gameId)) {
+                cancelAllTask()
+//                执行换牌策略
+                val winRateLimit = ConfigUtil.getInt(ConfigEnum.MAXIMUM_WIN_RATE_LIMIT)
+                val winStreakLimit = ConfigUtil.getInt(ConfigEnum.MAXIMUM_WIN_STREAK_LIMIT)
+                (ChangeCardThread {
+                    if (winRateLimit >= 0
+                        && WarEx.warCount != 0
+                        && (WarEx.winCount * 100.0 / WarEx.warCount) > winRateLimit.toDouble()
+                    ) {
+                        log.info { "达到胜率限制[${winRateLimit}%]，准备投降" }
+                        GameUtil.surrender()
+                    } else if (winStreakLimit >= 0 && WarEx.winStreak > winStreakLimit) {
+                        log.info { "达到连胜限制[$winStreakLimit]，准备投降" }
+                        GameUtil.surrender()
+                    } else {
+                        changeCard()
+                    }
+                }.also { addTask(it) }).start()
+            }
+        } else if (tagChangeEntity.tag == TagEnum.NEXT_STEP && StepEnum.MAIN_READY.name == tagChangeEntity.value) {
+            war.currentPhase = WarPhaseEnum.SPECIAL_EFFECT_TRIGGER
+            return true
+        }
+        return false
+    }
+
+
+}

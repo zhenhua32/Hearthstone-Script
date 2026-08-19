@@ -1,0 +1,1 @@
+go build -ldflags="-s -w" -o card-update-util.exe && upx.exe -9 card-update-util.exe

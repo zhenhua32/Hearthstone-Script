@@ -1,0 +1,40 @@
+# Binaries
+hs-script-version-server
+hs-script-version-server.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Releases
+releases/*.zip
+releases/releases.json
+
+# Keep example files
+!releases/releases.json.example
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

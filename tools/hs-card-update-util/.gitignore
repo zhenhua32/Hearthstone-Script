@@ -1,0 +1,4 @@
+*.json
+.idea
+*.db*
+card-update-util.exe
