@@ -8,6 +8,13 @@ import club.xiaojiawei.hsscriptcardsdk.mapper.WarMapper
 import club.xiaojiawei.hsscriptbase.util.isTrue
 
 /**
+ * 一局炉石对战的可变聚合根，也是策略模拟时复制的最小完整状态。
+ *
+ * Player 持有各 Area，Area 持有 Card；[cardMap] 以 entityId 提供跨区域稳定索引。
+ * 真实日志解析通常操作全局 `WAR`，MCTS 则通过 [deepClone] 创建隔离分支。所有新增卡牌
+ * 应优先调用 [addCard]，保证区域和 cardMap 同时更新。
+ *
+ * @param allowLog 是否记录回合、先后手和阶段变化；模拟分支通常关闭，避免搜索刷屏。
  * @author 肖嘉威
  * @date 2025/1/22 16:53
  */
@@ -75,6 +82,10 @@ class War(
         return nextMaxEntityId
     }
 
+    /**
+     * 交换观察视角，让“我方/敌方”和 player1/player2 同时反转。
+     * 多回合反演搜索使用该方法从对手视角生成下一层动作。
+     */
     fun exchangePlayer() {
         val tempMe = me
         me = rival
@@ -110,6 +121,10 @@ class War(
         return deepClone(false)
     }
 
+    /**
+     * 深复制战局并重新连接 Player -> War、Area -> Player、Card -> Area 引用。
+     * 不能只复制 [cardMap]：同一实体必须同时出现在新玩家区域和新 cardMap 中。
+     */
     fun deepClone(allowLog: Boolean): War {
         val newWar = War(allowLog = allowLog)
         WarMapper.INSTANCE.update(this, newWar)
@@ -137,6 +152,7 @@ class War(
     }
 }
 
+/** 仅对非哨兵 War 执行代码块，便于链式处理尚未完成建局的状态。 */
 fun War.safeRun(block: (War) -> Unit): War {
     if (isInValid()) {
         return this

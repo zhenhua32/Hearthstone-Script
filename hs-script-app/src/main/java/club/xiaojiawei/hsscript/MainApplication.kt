@@ -49,13 +49,25 @@ import javax.swing.AbstractAction
 import kotlin.system.exitProcess
 
 /**
- * javaFX启动器
+ * JavaFX 应用生命周期入口，同时负责把 UI 生命周期与脚本后台服务连接起来。
+ *
+ * 主要阶段：
+ * 1. [start] 处理只打开指定窗口的轻量参数，否则执行完整初始化链；
+ * 2. [preInit] 安装默认卡牌动作、后台服务、卡牌组和退出钩子；
+ * 3. `InitializerConfig` 初始化路径、日志、插件、驱动等基础设施；
+ * 4. [showMainPage] 展示主窗口；窗口首次可见后由 [afterShowing] 完成托盘、
+ *    系统检查、命令行语义和目录保护。
+ *
+ * JavaFX 被设置为关闭最后一个窗口时不退出，真正退出由托盘菜单或关闭钩子管理。
+ * 耗时操作应提交到后台线程，所有 Stage 操作都应通过 `runUI` 回到 FX 线程。
+ *
  * @author 肖嘉威
  * @date 2023/7/6 9:46
  */
 class MainApplication : Application() {
     private var stageShowingListener: ChangeListener<Boolean?>? = null
 
+    /** 开发辅助入口：动态编译并反射调用外部 Java 文件，不参与正常启动流程。 */
     fun testJava() {
         try {
             val classManager = DynamicClassManager()
@@ -79,6 +91,7 @@ class MainApplication : Application() {
         }
     }
 
+    /** 开发辅助入口：动态加载单个外部 Kotlin 文件，不参与正常启动流程。 */
     fun testKt() {
         try {
             val manager = DynamicClassManager()
@@ -97,6 +110,10 @@ class MainApplication : Application() {
         }
     }
 
+    /**
+     * 将给定 Kotlin 文件编译到系统临时目录，并反射调用第一个文件对应类的 `getWar`。
+     * 该方法用于开发期实验，调用方必须自行提供完整 classpath；编译产物不进入正式插件体系。
+     */
     fun compileAndRunExternalKtFiles(
         filePaths: List<String>,
         classpath: String,
@@ -152,6 +169,13 @@ class MainApplication : Application() {
         }
     }
 
+    /**
+     * JavaFX 回调入口。
+     *
+     * `--window=` 用于复用已启动进程只展示某个窗口，此时会跳过完整初始化。
+     * 正常启动则先装配全局服务，再运行 initializer 责任链。即使初始化异常，仍会
+     * 尝试展示主界面，以便用户查看日志或进入设置修复路径配置。
+     */
     override fun start(stage: Stage?) {
         runCatching {
             for (string in ScriptStatus.programArgs) {
@@ -172,6 +196,12 @@ class MainApplication : Application() {
 //        compileAndRunExternalKtFiles(listOf("S:\\IdeaProjects\\fs32\\src\\main\\java\\com\\fs\\TestUtil.kt"), System.getProperty("java.class.path"))
     }
 
+    /**
+     * 安装所有 initializer 之前就必须可用的进程级依赖。
+     *
+     * 默认 CardAction 工厂会被 SDK 的每个卡牌动作间接使用；服务监听器通过 lazy
+     * 属性注册；卡牌组需要先进入全局 Trie；退出钩子最后注册以接管资源清理。
+     */
     private fun preInit() {
         CardAction.commonActionFactory = Supplier { DEFAULT.createNewInstance() }
         Platform.setImplicitExit(false)
@@ -180,6 +210,12 @@ class MainApplication : Application() {
         ShutdownHookConfig.init
     }
 
+    /**
+     * 根据 `--page=` 参数展示指定页面，或创建主窗口。
+     *
+     * 主窗口的后置初始化只在第一次真正显示时执行，监听器随后立即移除，防止窗口
+     * 隐藏/恢复时重复创建托盘、重复检查参数或重复设置目录保护。
+     */
     private fun showMainPage() {
         if (ScriptStatus.programArgs.stream().anyMatch {
                 if (it.startsWith(ARG_PAGE)) {
@@ -384,6 +420,11 @@ class MainApplication : Application() {
         }
     }
 
+    /**
+     * 触发全局后台服务的 lazy 初始化。
+     *
+     * 这些对象大多通过属性访问完成监听器注册；热键监听可能阻塞，因此单独放入后台线程。
+     */
     private fun launchService() {
         TaskManager.launch
         Core.launch
@@ -395,6 +436,12 @@ class MainApplication : Application() {
 
     private var aoting = false
 
+    /**
+     * 解释需要等主窗口可见后才能处理的命令行参数。
+     *
+     * `--pause=false` 会自动开始脚本；否则根据版本和首次使用标记展示关于/更新页面。
+     * AOT 参数只记录构建状态，实际退出时机由 [afterShowing] 统一处理。
+     */
     private fun checkArg() {
         val args = this.parameters.raw
         var pause: String? = ""
@@ -431,6 +478,11 @@ class MainApplication : Application() {
         }
     }
 
+    /**
+     * 检查管理员权限、多显示器和 JVM AOT 缓存前置条件。
+     *
+     * 检查失败通常只降级或提示，不直接终止应用；这样用户仍可进入设置页面调整环境。
+     */
     private fun checkSystem() {
         CSystemDll.INSTANCE.isRunAsAdministrator().isFalse {
             val text = "当前进程不是以管理员启动，功能可能受限"
@@ -454,6 +506,12 @@ class MainApplication : Application() {
         }
     }
 
+    /**
+     * 主窗口首次显示后的后台收尾阶段。
+     *
+     * 这里创建系统托盘、应用目录保护模式并关闭启动页。AOT 采集模式会短暂打开设置页
+     * 后自动退出；普通模式则保持 JavaFX 和后台监听器持续运行。
+     */
     private fun afterShowing() {
         submitExtra {
             initTrayMenu

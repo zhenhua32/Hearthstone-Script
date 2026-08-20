@@ -9,7 +9,8 @@ import (
 	"club.xiaojiawei/hs-script-update/internal/utils"
 )
 
-// ProgressCallback 进度回调接口
+// ProgressCallback 将核心更新流程与具体界面解耦。
+// GUI 和命令行入口可以实现同一组回调；核心逻辑在回调为空时仍可独立运行。
 type ProgressCallback interface {
 	SetStatus(status string)
 	SetProgress(current, max int)
@@ -18,7 +19,10 @@ type ProgressCallback interface {
 	ShowSuccess(message string)
 }
 
-// Updater 更新器核心
+// Updater 封装一次完整更新所需的输入和运行期状态。
+//
+// 更新包先解压到目标目录下的临时目录，再按 JVM/Native 版本各自的保留规则覆盖文件。
+// isPause 会在重启主程序时原样传递，mainPid 用于避免主程序仍占用待替换文件。
 type Updater struct {
 	zipFilePath    string
 	targetDir      string
@@ -29,7 +33,7 @@ type Updater struct {
 	progress       ProgressCallback
 }
 
-// NewUpdater 创建更新器实例
+// NewUpdater 创建更新器实例。构造阶段不访问文件系统，实际校验全部延迟到 Update。
 func NewUpdater(zipFilePath, targetDir string, isPause bool, mainPid int, mainProgram string) *Updater {
 	return &Updater{
 		zipFilePath:    zipFilePath,
@@ -70,7 +74,11 @@ func (u *Updater) updateProgress(current, max int) {
 	}
 }
 
-// Update 执行更新
+// Update 执行更新状态机。
+//
+// 固定顺序为：等待主进程退出、校验输入、清理/创建临时目录、解压、识别发行形态、
+// 覆盖文件、清理现场、重启主程序。中途失败时返回带阶段信息的错误，并尽可能移除
+// 临时解压内容；用户配置和数据是否保留由 config 中对应版本的白名单决定。
 func (u *Updater) Update() error {
 	u.logStatus("========================================")
 	u.logStatus("开始更新程序")
@@ -219,7 +227,7 @@ func (u *Updater) Update() error {
 	return nil
 }
 
-// performUpdate 执行更新操作
+// performUpdate 根据已安装目录识别出的发行形态选择对应覆盖策略。
 func (u *Updater) performUpdate(isJvmVersion bool) error {
 	extractedDir := utils.FindExtractedDirectory(u.tempExtractDir)
 
@@ -229,7 +237,7 @@ func (u *Updater) performUpdate(isJvmVersion bool) error {
 	return u.updateNativeVersion(extractedDir)
 }
 
-// updateJVMVersion 更新 JVM 版本
+// updateJVMVersion 更新 JVM 发行版，同时排除用户目录和需由用户自行管理的插件目录。
 func (u *Updater) updateJVMVersion(extractedDir string) error {
 	u.logStatus("更新 JVM 版本...")
 	u.logDetail(fmt.Sprintf("保留目录: %s", strings.Join(config.JVMPreserveDirs, ", ")))
@@ -249,7 +257,7 @@ func (u *Updater) updateJVMVersion(extractedDir string) error {
 	return nil
 }
 
-// updateNativeVersion 更新 Native 版本
+// updateNativeVersion 更新 Native 发行版，仅保留配置和运行数据等白名单目录。
 func (u *Updater) updateNativeVersion(extractedDir string) error {
 	u.logStatus("更新 Native 版本...")
 	u.logDetail(fmt.Sprintf("保留目录: %s", strings.Join(config.NativePreserveDirs, ", ")))
@@ -268,7 +276,7 @@ func (u *Updater) updateNativeVersion(extractedDir string) error {
 	return nil
 }
 
-// cleanup 清理临时文件
+// cleanup 是失败路径的尽力清理：清理失败只记录日志，不覆盖真正的更新错误。
 func (u *Updater) cleanup() {
 	if utils.Exists(u.tempExtractDir) {
 		if err := utils.Delete(u.tempExtractDir); err != nil {

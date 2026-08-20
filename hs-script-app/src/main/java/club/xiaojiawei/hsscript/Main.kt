@@ -18,6 +18,15 @@ import java.io.File
 
 
 /**
+ * JVM 版桌面程序入口。
+ *
+ * 启动顺序必须保持为：配置 JNA 搜索路径 -> 判断 AOT 模式 -> 获取单实例锁 ->
+ * 重载日志配置 -> 保存命令行参数 -> 启动 JavaFX。前几步都发生在 JavaFX
+ * Application Thread 创建之前，因此这里不要直接访问 Stage 或其他 UI 对象。
+ *
+ * AOT 构建过程允许绕过单实例锁；普通运行时如果发现同名 Windows Mutex 已存在，
+ * 会关闭启动页并立即返回，避免两个进程同时读写配置、日志和游戏窗口。
+ *
  * @author 肖嘉威
  * @date 2024/10/14 17:42
  */
@@ -37,6 +46,13 @@ fun main(args: Array<String>) {
     Application.launch(MainApplication::class.java, *args)
 }
 
+/**
+ * 从程序工作目录重新加载 logback.xml，并为文件 appender 安装运行时级别过滤器。
+ *
+ * 控制台日志级别和文件日志级别是两套配置；这里仅约束名为 `file_async` 下的
+ * `file` appender。配置缺失或 appender 名称变化时方法会安全退出，异常只打印到
+ * 标准错误，避免日志初始化失败阻止主界面启动。
+ */
 private fun setLogPath() {
     try {
         val context = LoggerFactory.getILoggerFactory()
@@ -69,6 +85,12 @@ private fun setLogPath() {
     }
 }
 
+/**
+ * 通过 Windows 命名 Mutex 实现进程级单实例保护。
+ *
+ * Mutex 句柄由操作系统在进程结束时回收；返回 `false` 仅表示启动时已经存在同名
+ * Mutex，不代表当前进程发生了其他初始化错误。
+ */
 private fun createProgramLock(): Boolean {
     val name = "${PROGRAM_NAME}.lock"
 

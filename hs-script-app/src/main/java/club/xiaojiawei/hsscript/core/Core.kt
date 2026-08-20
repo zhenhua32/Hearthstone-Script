@@ -20,16 +20,30 @@ import club.xiaojiawei.hsscriptbase.util.isTrue
 import java.util.concurrent.locks.ReentrantLock
 
 /**
- * 控制脚本的启动
+ * 脚本运行生命周期的总协调器。
+ *
+ * [PauseStatus] 表示用户层面的开始/暂停，[WorkTimeListener] 表示时间规则是否允许工作；
+ * 两者都满足时才会进入 Starter 责任链。对象本身不直接启动战网、炉石或日志监听，
+ * 而是把这些步骤委托给 `StarterConfig.starter`，从而让失败恢复和重试逻辑保持一致。
+ *
+ * [launch] 是 lazy 注册入口，应用启动时必须访问一次。真正的启动任务在
+ * `CORE_THREAD_POOL` 上执行，并由 [lock] 串行化，防止暂停监听、工作时间监听和
+ * 手动重启同时触发多条启动链。
+ *
  * @author 肖嘉威
  * @date 2023/7/5 13:15
  */
 object Core {
+    /** 最近一次检测到游戏活动的时间戳，供异常恢复/超时判断使用。 */
     @Volatile
     var lastActiveTime: Long = 0
 
     private val lock = ReentrantLock()
 
+    /**
+     * 注册暂停状态与工作时间监听器。
+     * 访问该属性只负责注册，实际动作由后续属性变化异步触发。
+     */
     val launch: Unit by lazy {
         PauseStatus.addChangeListener { _, _, newValue ->
             newValue
@@ -83,7 +97,12 @@ object Core {
     }
 
     /**
-     * 启动脚本
+     * 尝试启动脚本责任链。
+     *
+     * @param force 为 `true` 时忽略 `WorkTimeListener.working` 的重复启动短路，常用于
+     * 工作时间从不可用切换到可用的边界；互斥锁仍然生效。
+     *
+     * 路径无效时不会启动外部程序，而是提示用户、打开设置页并恢复暂停状态。
      */
     fun start(force: Boolean = false) {
         if ((!force && WorkTimeListener.working) || lock.isLocked) return
@@ -107,7 +126,9 @@ object Core {
     }
 
     /**
-     * 重启脚本
+     * 重置界面日志处理状态、暂停脚本、结束游戏并重新触发启动链。
+     *
+     * @param sync 是否在调用线程完成状态切换；默认提交到核心线程池，避免阻塞日志或 UI 线程。
      */
     fun restart(sync: Boolean = false) {
         ScreenLogListener.resetDealing()

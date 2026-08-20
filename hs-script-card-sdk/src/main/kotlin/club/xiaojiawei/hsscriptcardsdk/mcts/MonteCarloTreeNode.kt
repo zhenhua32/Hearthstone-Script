@@ -11,7 +11,12 @@ import kotlin.math.max
 import kotlin.math.sqrt
 
 /**
- * 蒙特卡洛树节点
+ * MCTS 树节点：保存一个动作应用后的 War 状态、后续合法动作和统计信息。
+ *
+ * [applyAction] 属于“父节点 -> 当前节点”的边；根节点使用 InitAction。节点创建时立即
+ * 枚举当前玩家可打出、攻击、使用技能和结束回合的动作，但 children 按需展开。
+ * [actionsExpandedFlag] 与 actions 下标一一对应，确保同一动作只生成一个正式树子节点。
+ *
  * @author 肖嘉威
  * @date 2025/1/10 16:27
  */
@@ -50,6 +55,10 @@ class MonteCarloTreeNode(
     /**
      * 根据指定状态生成所有可能的动作
      */
+    /**
+     * 根据资源、区域容量、卡牌类型与可攻击/可使用状态枚举合法动作。
+     * TurnOverAction 始终优先加入；其后的具体动作由各 CardAction 提供模拟语义。
+     */
     private fun generateActions(war: War): MutableList<Action> {
         val result = mutableListOf<Action>()
         if (applyAction !== TurnOverAction) {
@@ -84,7 +93,8 @@ class MonteCarloTreeNode(
     }
 
     /**
-     * 在当前节点状态下构建下一个节点
+     * 在当前状态应用动作并构造下一节点。
+     * @param cloneWar 正式树扩展必须为 `true`；rollout 深层可在独占分支上设为 `false` 复用对象。
      */
     fun buildNextNode(
         action: Action,
@@ -157,6 +167,9 @@ class MonteCarloTreeNode(
         return state.isEnd || isLeaf()
     }
 
+    /**
+     * 节点评分和 UCB 统计。score 延迟计算，避免未被比较的节点支付完整评分成本。
+     */
     class State(val war: War, arg: MCTSArg) {
 
         val score: Double by lazy { calcScore(war, arg) }
@@ -180,6 +193,7 @@ class MonteCarloTreeNode(
             }
         }
 
+        /** 未访问节点返回极大值以保证至少探索一次，否则使用胜率加探索项。 */
         fun calcUCB(totalCount: Int, c: Double = 2.0): Double {
             return if (visitCount == 0)
                 Int.MAX_VALUE.toDouble()

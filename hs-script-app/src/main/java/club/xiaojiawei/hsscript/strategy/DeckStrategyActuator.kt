@@ -22,7 +22,15 @@ import club.xiaojiawei.hsscriptcardsdk.status.WAR
 import club.xiaojiawei.hsscriptstrategysdk.TimelineEvent
 
 /**
- * 卡牌策略执行器
+ * 将抽象 [club.xiaojiawei.hsscriptstrategysdk.DeckStrategy] 决策转换为真实游戏操作。
+ *
+ * 该对象位于“模型/策略”和“鼠标/UI”之间：PhaseStrategy 在适当时机调用它，它先检查
+ * 策略开关、玩家有效性和投降请求，再委托当前策略，最后通过 GameUtil 完成确认、取消、
+ * 结束回合等兜底动作。策略异常不应让游戏永久卡在选择界面，因此关键流程使用 `finally`
+ * 恢复 UI 状态。
+ *
+ * 调用方法通常包含动画等待和鼠标操作，不能在 JavaFX Application Thread 上执行。
+ *
  * @author 肖嘉威
  * @date 2022/11/29 17:29
  */
@@ -30,11 +38,13 @@ object DeckStrategyActuator {
 
     private val war = WAR
 
+    /** 重置当前策略的局内状态，并立即消费策略可能提出的投降请求。 */
     fun reset() {
         DeckStrategyManager.currentDeckStrategy?.reset()
         checkSurrender()
     }
 
+    /** 按概率发送问候/感谢表情；仅在策略执行条件满足时生效。 */
     fun randEmoji() {
         if (!canExec()) return
 
@@ -93,6 +103,12 @@ object DeckStrategyActuator {
         }
     }
 
+    /**
+     * 执行起手换牌。
+     *
+     * 传给策略的是手牌集合副本，策略通过“从集合删除”表达需要换掉的卡。硬币永远不参与
+     * 换牌。最终的多次确认点击用于容忍动画、丢帧或第一次点击未被客户端接收。
+     */
     fun changeCard() {
         if (!canExec()) return
 
@@ -131,6 +147,12 @@ object DeckStrategyActuator {
         }
     }
 
+    /**
+     * 执行我方回合策略并负责回合收尾。
+     *
+     * 在进入策略前应用配置型回合投降上限；策略完成或抛出异常后都会取消悬挂动作并反复
+     * 尝试点击结束回合，防止目标选择框、发现遮罩等 UI 状态阻塞后续日志阶段。
+     */
     fun outCard() {
         if (!canExec()) return
 
@@ -174,6 +196,10 @@ object DeckStrategyActuator {
         }
     }
 
+    /**
+     * 执行发现选择。策略返回值会被限制到有效下标；异常或未给出选择时默认第一张。
+     * 选择后再次检查投降请求，使策略可在发现决策中终止本局。
+     */
     fun discoverChooseCard(cards: List<Card>) {
         if (!canExec()) return
 
@@ -202,6 +228,7 @@ object DeckStrategyActuator {
         checkSurrender()
     }
 
+    /** 执行时间线二选一；策略默认保持时间线，只有显式调用 `rewind()` 才回溯。 */
     fun chooseTimeLine(timeLineEvent: TimelineEvent) {
         if (!canExec()) return
 
@@ -224,6 +251,7 @@ object DeckStrategyActuator {
         checkSurrender()
     }
 
+    /** 所有真实策略动作的统一门禁；检查本身可能消费一次投降请求。 */
     private fun canExec(): Boolean {
         return ConfigUtil.getBoolean(ConfigEnum.STRATEGY) && validPlayer() && !checkSurrender()
     }
@@ -236,6 +264,10 @@ object DeckStrategyActuator {
         return true
     }
 
+    /**
+     * 原子式消费策略的 `needSurrender` 标记并异步点击投降。
+     * 返回 `true` 表示本次调用已转为投降流程，调用方不应继续执行其他动作。
+     */
     private fun checkSurrender(): Boolean {
         DeckStrategyManager.currentDeckStrategy?.let {
             if (it.needSurrender) {

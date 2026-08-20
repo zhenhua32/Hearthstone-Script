@@ -20,6 +20,16 @@ import java.util.stream.StreamSupport
 
 
 /**
+ * CardAction 与 DeckStrategy 插件的发现、去重和作用域注册中心。
+ *
+ * 加载分为内置 classpath SPI 与 `plugin` 目录外部 ClassLoader 两部分。每个 Plugin 元数据
+ * 与同包/同 ClassLoader 下的 SPI 实例组合成 `PluginWrapper`，随后按插件 id 只保留最高版本。
+ * 最终 Map 的 key 不是始终等于插件自身 id：CardPlugin 会根据 [PluginScope] 映射到公共、
+ * 私有或指定策略作用域；StrategyPlugin 则只映射到自身 id。
+ *
+ * [loadCard]、[loadDeck] 是“本轮加载完成”信号，Manager 监听它们重建运行时索引。
+ * 插件开关只影响实例是否进入索引，不卸载对应 ClassLoader。
+ *
  * @author 肖嘉威
  * @date 2024/9/7 15:05
  */
@@ -57,6 +67,7 @@ object PluginManager {
         return loadCard.readOnlyProperty
     }
 
+    /** 先加载卡牌动作，再加载策略；保证策略索引建立时卡牌作用域已经可用。 */
     fun loadAllPlugins() {
         loadCardPlugin()
         loadDeckPlugin()
@@ -84,6 +95,9 @@ object PluginManager {
         }
     }
 
+    /**
+     * 通用 SPI 加载流程。先收集候选项，不立即写目标 Map，以便跨内置/外部来源统一比较版本。
+     */
     private fun <T, P : Plugin> loadPlugin(
         aClass: Class<T>,
         pluginClass: Class<P>,
@@ -179,6 +193,7 @@ object PluginManager {
         applyHighestVersionPolicy(pendingPlugins, pluginWrapperMap, pluginClass.simpleName)
     }
 
+    /** 按插件 id 比较版本，只注册每个 id 的最高版本候选；同一候选可映射到多个 targetId。 */
     private fun <T> applyHighestVersionPolicy(
         pendingPlugins: List<PendingPlugin<T>>,
         pluginWrapperMap: MutableMap<String, MutableList<PluginWrapper<T>>>,
@@ -209,6 +224,7 @@ object PluginManager {
         }
     }
 
+    /** 把插件声明的 Scope 转成运行时索引 key。空字符串代表所有策略都可见的公共卡牌动作。 */
     private fun resolveTargetIds(plugin: Plugin): List<String> {
         return if (plugin is CardPlugin) {
             val pluginScope = plugin.pluginScope()

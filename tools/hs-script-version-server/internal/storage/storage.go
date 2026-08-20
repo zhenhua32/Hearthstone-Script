@@ -11,13 +11,15 @@ import (
 	"club.xiaojiawei/hs-script-version-server/internal/model"
 )
 
-// Storage 存储接口
+// Storage 定义 HTTP 层需要的只读版本查询能力。
+// FileStorage 之外的实现（例如测试内存存储）无需暴露底层文件布局。
 type Storage interface {
 	GetLatestRelease(prerelease bool) (*model.Release, error)
 	GetAllReleases() (model.Releases, error)
 }
 
-// FileStorage 基于文件系统的存储
+// FileStorage 以 releases.json 为权威元数据；文件不存在时退化为扫描 zip 文件名。
+// 该类型不缓存结果，适合由部署流程原子替换元数据文件后立即提供新版本。
 type FileStorage struct {
 	releasesDir string // releases 目录路径
 }
@@ -29,7 +31,8 @@ func NewFileStorage(releasesDir string) *FileStorage {
 	}
 }
 
-// GetLatestRelease 获取最新版本
+// GetLatestRelease 按 model.Releases 的排序规则返回最新匹配项。
+// prerelease=false 时跳过开发、测试和 Beta 版本。
 func (fs *FileStorage) GetLatestRelease(prerelease bool) (*model.Release, error) {
 	releases, err := fs.GetAllReleases()
 	if err != nil {
@@ -53,7 +56,8 @@ func (fs *FileStorage) GetLatestRelease(prerelease bool) (*model.Release, error)
 	return nil, fmt.Errorf("no matching release found")
 }
 
-// GetAllReleases 获取所有版本
+// GetAllReleases 优先解析 releases.json；仅在文件不存在时扫描目录。
+// 元数据文件存在但格式错误会直接报错，避免悄悄发布由文件名推断出的不完整信息。
 func (fs *FileStorage) GetAllReleases() (model.Releases, error) {
 	// 读取 releases.json 文件
 	releasesFile := filepath.Join(fs.releasesDir, "releases.json")
@@ -78,7 +82,8 @@ func (fs *FileStorage) GetAllReleases() (model.Releases, error) {
 	return releases, nil
 }
 
-// scanReleasesFromDirectory 从目录扫描 release（备用方案）
+// scanReleasesFromDirectory 从 hs-script_{tag}.zip 文件名构造最小 Release 元数据。
+// 创建和发布时间使用文件修改时间，预发布状态由 tag 中的约定后缀推断。
 func (fs *FileStorage) scanReleasesFromDirectory() (model.Releases, error) {
 	entries, err := os.ReadDir(fs.releasesDir)
 	if err != nil {
@@ -126,7 +131,7 @@ func (fs *FileStorage) scanReleasesFromDirectory() (model.Releases, error) {
 	return releases, nil
 }
 
-// SaveReleases 保存 releases 到文件
+// SaveReleases 以缩进 JSON 保存完整版本列表，主要供发布管理程序使用。
 func (fs *FileStorage) SaveReleases(releases model.Releases) error {
 	releasesFile := filepath.Join(fs.releasesDir, "releases.json")
 

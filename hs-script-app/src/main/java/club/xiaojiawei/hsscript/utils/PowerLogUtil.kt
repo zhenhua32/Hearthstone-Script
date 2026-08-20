@@ -36,7 +36,17 @@ import java.io.*
 import java.util.function.BiConsumer
 
 /**
- * 解析power.log日志的工具，非常非常非常重要
+ * Power.log 的领域解析器：把炉石文本日志增量还原为 [WAR] 中的实体、区域和阶段状态。
+ *
+ * 解析分为两层：
+ * 1. `parse*` 方法只负责从一行或连续多行中抽取 CommonEntity、Tag、Block 等结构；
+ * 2. `deal*` 方法把结构应用到已有 [Card]、[club.xiaojiawei.hsscriptcardsdk.bean.Player]
+ *    和 Area，并触发 TagHandler、发现/时间线选择等业务动作。
+ *
+ * [blockStack] 保存当前嵌套 BLOCK 上下文，[fullCardStack] 保存最近生成的卡牌，两者共同
+ * 识别没有显式“发现开始”事件的选择流程。该对象被日志线程调用，修改解析顺序或 seek
+ * 位置时必须保证下一次读取仍从尚未消费的首行开始。
+ *
  * @author 肖嘉威
  * @date 2022/11/28 23:12
  */
@@ -44,15 +54,15 @@ object PowerLogUtil {
 
     private val war = WAR
 
+    /** 最近的嵌套 BLOCK；BLOCK_END 以栈顺序与其配对。 */
     private val blockStack: FixedSizeStack<Block> = FixedSizeStack(20)
 
+    /** 最近 FULL_ENTITY 创建的卡牌，用于从连续 SETASIDE 实体推断发现/时间线选项。 */
     private val fullCardStack: FixedSizeStack<Card> = FixedSizeStack(10)
 
     /**
-     * 更新entity
-     * @param line
-     * @param logFile
-     * @return
+     * 处理 SHOW_ENTITY：补全一张已存在实体的可见信息，并在区域变化时移动卡牌。
+     * [parseExtraEntity] 会继续读取紧随其后的 tag 行，因此调用后日志游标已越过整个事件块。
      */
     fun dealShowEntity(line: String, logFile: LogFile): ExtraEntity {
         val extraEntity: ExtraEntity = parseExtraEntity(line, logFile, SHOW_ENTITY)
@@ -69,9 +79,9 @@ object PowerLogUtil {
     }
 
     /**
-     * 生成entity
-     * @param line
-     * @param logFiLE
+     * 处理 FULL_ENTITY：创建并缓存新卡牌、绑定动作、加入玩家区域并关联 creator。
+     *
+     * 掉线重连可能让牌库实体重复输出；如果 entityId 已存在则保留原对象，避免区域重复插入。
      */
     fun dealFullEntity(line: String, logFiLE: LogFile): ExtraEntity {
         val extraEntity: ExtraEntity = parseExtraEntity(line, logFiLE, FULL_ENTITY)
@@ -116,6 +126,12 @@ object PowerLogUtil {
 
     private var chooseThread: Thread? = null
 
+    /**
+     * 根据最近 FULL_ENTITY 与当前 BLOCK 推断“发现”或“时间线”选择。
+     *
+     * 同一时刻只保留一个选择线程；开始选择时设置 `war.isChooseCardTime`，使其他鼠标任务
+     * 不会抢占交互。结束后短暂持有 DRIVER_LOCK，等待游戏动画和日志状态追上实际点击。
+     */
     private fun dealTriggerChoose() {
         if (fullCardStack.size() < 2 && war.isMyTurn) return
         blockStack.peek()?.let { block ->
@@ -219,12 +235,7 @@ object PowerLogUtil {
         }
     }
 
-    /**
-     * 交换entity
-     * @param line
-     * @param logFile
-     * @return
-     */
+    /** 处理 CHANGE_ENTITY：在保留 entityId 的前提下，用新 cardId/标签覆盖变形后的实体。 */
     fun dealChangeEntity(line: String, logFile: LogFile): ExtraEntity {
         val extraEntity: ExtraEntity = parseExtraEntity(line, logFile, CHANGE_ENTITY)
         val card = war.cardMap[extraEntity.entityId]
@@ -245,9 +256,8 @@ object PowerLogUtil {
     }
 
     /**
-     * 改变entity属性
-     * @param line
-     * @return
+     * 处理 TAG_CHANGE，并将状态变化分派到 [TagEnum] 对应的 handler。
+     * 完整实体格式优先定位 Card；简写格式则先尝试按 gameId 定位 Player，最后退化为无上下文处理。
      */
     fun dealTagChange(line: String): TagChangeEntity {
         val tagChangeEntity: TagChangeEntity = parseTagChange(line)
@@ -279,6 +289,7 @@ object PowerLogUtil {
         return tagChangeEntity
     }
 
+    /** 处理 BLOCK_START，记录父块关系后压栈，供卡牌创建和触发选择逻辑读取上下文。 */
     fun dealBlock(line: String): Block {
         val block = parseBlock(line)
         block.parentBlock = blockStack.peek()
@@ -307,6 +318,7 @@ object PowerLogUtil {
         return null
     }
 
+    /** 处理 BLOCK_END；日志中的结束行不重复解析实体，只弹出最近的开始块。 */
     fun dealBlockEnd(line: String): Block? {
         return blockStack.pop()
     }
@@ -432,6 +444,10 @@ object PowerLogUtil {
     private const val CARD_ID_U = "CardID="
     private const val PLAYER = "player="
 
+    /**
+     * 解析 Power.log 常见的两种 Entity 表示：简单名称与方括号完整实体。
+     * 字段顺序来自炉石日志协议，版本更新若调整字段名或顺序，应优先修改此处并补充解析测试。
+     */
     fun parseCommonEntity(commonEntity: CommonEntity, line: String) {
         val preEntityIndex = line.indexOf(PRE_ENTITY)
 
@@ -484,6 +500,10 @@ object PowerLogUtil {
         }
     }
 
+    /**
+     * 判断一行是否属于 PowerTaskList，同时刷新游戏活动时间。
+     * 检测到日志截断提示时会通知用户并重启游戏，因为截断后继续解析会造成 WAR 状态缺失。
+     */
     fun isRelevance(l: String): Boolean {
         var flag = false
         if (l.contains("Truncating log")) {
@@ -498,6 +518,12 @@ object PowerLogUtil {
         return flag
     }
 
+    /**
+     * 提取 Power.log 中与 PowerTaskList 有关的行，供离线分析或生成精简日志。
+     *
+     * @param renew `true` 时保留为 `renew_Power.log`；否则尝试替换原文件。
+     * @return 处理后的文件，源文件不存在或读写失败时返回 `null`。
+     */
     fun formatLogFile(logDir: String, renew: Boolean): File? {
         val sourceFile = File("$logDir\\${GAME_WAR_LOG_NAME}")
         var res: File? = null

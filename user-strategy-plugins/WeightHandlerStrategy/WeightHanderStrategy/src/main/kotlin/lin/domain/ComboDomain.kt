@@ -21,31 +21,43 @@ import java.util.*
 
 
 /**
- * todo-future 名字还没有想好
- * 参考数据
- * 执行攻击动作
- * club.xiaojiawei.util.DeckStrategyUtil.Result.execAction
- * mapstruct DaoDao复制 Mapper
+ * 权重策略的一回合出牌编排器。
  *
- * []
- * 出牌条件 先打出组里 16.1   .1策略先打出条件为16.0卡
+ * 本类位于“组合搜索”和“真实出牌”之间：先用 [WeightHandlerDomain] 从当前 [War]
+ * 快照中选择高权重组合，再按前置策略、普通卡牌和延后卡牌的顺序交给 [MyWarManage]
+ * 执行。每次动作后都会检测战局是否发生变化；一旦变化便重新加载快照并重新搜索，
+ * 避免继续执行基于旧费用、旧手牌或旧目标计算出的组合。
+ *
+ * 插件中的规则和数据库组件通过 Koin/SPI 动态加载，因此所有入口都必须临时切换线程
+ * 上下文类加载器。调用结束后会恢复原类加载器，防止插件类加载器泄漏到宿主线程。
  */
-
 class ComboDomain(war: War) {
 
-    //SPI没法抛异常把把val 改为 lateinit var
-    //存储转化权重信息
+    /** 在插件类加载器和临时 Koin 环境初始化完成后赋值，负责战局快照与真实动作。 */
     private lateinit var warManage: MyWarManage
+
+    /** 根据当前快照计算可用卡牌组合、换牌权重和发现选择。 */
     private lateinit var weightHandlerDomain: WeightHandlerDomain
+
+    /** 汇总规则生命周期，使一局/一次执行所需的规则状态按统一时机初始化。 */
     private val lifecycleRegisterImpl = LifecycleRegisterImpl()
+
+    /**
+     * 策略 jar 的类加载器。ServiceLoader 与 Koin 都依赖线程上下文类加载器发现插件实现，
+     * 获取失败时回退到当前类的加载器，确保内置规则仍有机会运行。
+     */
     private val classLoader = JarClassLoader(parent = javaClass.classLoader).classLoader() ?: run {
         myLog.warn { "没有获取到类加载器" }
         javaClass.classLoader
     }
+
+    /** 最优组合之外仍可能在剩余费用阶段尝试的卡牌，按 [ComboCard] 的自然顺序排列。 */
     private var unAbleUseCards: TreeSet<ComboCard>? = null
+
+    /** 在前置/后置策略之间传递本次动作结果，并在发现选择结束后释放等待状态。 */
     private val useStrategyUtils = UseStrategyUtils()
 
-    //存储策略分组
+    // 只在构造阶段短暂启动 Koin：解析并构造领域对象后立即停止，避免污染宿主全局容器。
     init {
         myLog.info {
             "ComboDao初始化"
@@ -63,6 +75,7 @@ class ComboDomain(war: War) {
         }
     }
 
+    /** 在插件类加载器上下文执行代码，并无条件恢复调用线程原来的上下文类加载器。 */
     private inline fun threadContext(runnable: () -> Unit) {
         val threadClassLoader = Thread.currentThread().contextClassLoader
         try {
@@ -76,6 +89,10 @@ class ComboDomain(war: War) {
         }
     }
 
+    /**
+     * 建立一次组合计算所需的规则生命周期和战局执行环境。
+     * 规则级生命周期每次执行都会启动；对局级生命周期仅在战局已经开始时启动。
+     */
     private inline fun executeEnvironment(runnable: () -> Unit) {
         threadContext {
             lifecycleRegisterImpl.startAllRuleLifecycles()
@@ -90,6 +107,12 @@ class ComboDomain(war: War) {
 
     }
 
+    /**
+     * 最优组合执行后尝试利用剩余费用。
+     *
+     * 英雄技能被包装成临时 [ComboCard] 与候选卡一起按权重比较；只有“费用权重 + 动作权重”
+     * 没有跌破 [NotWeight] 且费用足够时才会尝试。返回 true 表示战局发生变化并已触发重算。
+     */
     private fun processLessCost(): Boolean {
         myLog.info { "处理剩余费用" }
         val costWeight = CostWeight * warManage.getNowCost()
@@ -120,9 +143,12 @@ class ComboDomain(war: War) {
 
         return false
     }
+    /** 同一轮因战局变化触发的重算深度，用于阻断动作异常导致的无限递归。 */
     private var stackNum = 0
+
     /**
-     * 出牌策略
+     * 执行当前回合的出牌策略入口。
+     * 先寻找并执行最优组合，再用 [processLessCost] 尝试消耗仍可利用的费用。
      */
     fun outCardStrategy() {
         myLog.info { "执行出牌策略" }
@@ -133,6 +159,7 @@ class ComboDomain(war: War) {
         }
     }
 
+    /** 查询最优组合，并仅在搜索得到完整 [EndWeightResult] 时进入真实动作阶段。 */
     private fun findAndUse() {
         if (stackNum == MaxStackNum) {
             log.warn { "栈过深" }
@@ -150,7 +177,10 @@ class ComboDomain(war: War) {
 
 
     /**
+     * 按组合约束执行搜索结果。
      *
+     * 普通卡按权重从高到低执行；带 lastUse 约束的卡延迟到最后，并按 comboWeight 排序。
+     * 如果实际费用下降少于预期，说明组合中有动作未成功，再尝试搜索结果提供的补偿候选。
      */
     private fun executeUseCard(weightResult: EndWeightResult) {
         val bestCombination = weightResult.bestCombination
@@ -218,17 +248,25 @@ class ComboDomain(war: War) {
         }
     }
 
+    /** 按声明顺序执行卡牌的前置扩展动作。 */
     fun List<UseBeforeStrategy>.executeAction(card: ComboCard, useStrategyUtils: UseStrategyUtils) {
         this.forEach {
             it.extAction(card, useStrategyUtils)
         }
     }
 
+    /** 按声明顺序执行卡牌的后置扩展动作，并共享本次真实出牌结果。 */
     fun List<UseAfterStrategy>.executeAfterAction(card: ComboCard, useStrategyUtils: UseStrategyUtils) {
         this.forEach {
             it.afterExtAction(card, useStrategyUtils)
         }
     }
+    /**
+     * 尝试执行一张卡或英雄技能，并在战局变化后立即刷新和重算。
+     *
+     * 返回值表示动作前后快照是否发生变化，而不只是底层点击是否成功。成功动作后等待动画，
+     * 是为了让日志解析和画面状态追上真实客户端，再进行下一次组合搜索。
+     */
     fun useCardAndIsReload(card: ComboCard): Boolean {
         val changeResult = warManage.isChange {
             card.useBeforeStrategy?.executeAction(card, useStrategyUtils)
@@ -250,6 +288,10 @@ class ComboDomain(war: War) {
         return changeResult
     }
 
+    /**
+     * 计算起手换牌集合。启用换牌权重时由规则系统修改集合；关闭时使用“保留费用不高于 2”
+     * 的简单回退策略。传入集合会被原地修改，调用方应直接读取执行后的集合。
+     */
     fun executeChangeCard(cards: HashSet<Card>) {
         threadContext {
             if (BaseData.enableChangeWeight) {
@@ -263,6 +305,10 @@ class ComboDomain(war: War) {
 
     }
 
+    /**
+     * 对发现候选执行权重选择并返回候选下标。
+     * finally 中无条件释放 [useStrategyUtils] 的等待状态，避免规则异常使后续动作永久阻塞。
+     */
     fun executeDiscoverChooseCard(vararg cards: Card): Int {
         try {
             var index = 0

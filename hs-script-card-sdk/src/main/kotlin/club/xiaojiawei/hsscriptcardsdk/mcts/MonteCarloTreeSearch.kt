@@ -16,15 +16,28 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.min
 
+/** 蒙特卡洛树默认最大选择深度，防止动作环或异常模型产生无限下降。 */
+const val MCTS_DEFAULT_DEPTH = 10
+
 /**
- * 蒙特卡洛树搜索
+ * 基于可模拟 [War] 的蒙特卡洛树搜索实现。
+ *
+ * 单次迭代遵循 Selection -> Expansion -> Simulation -> Back-propagation：
+ * - Selection 用 UCB 在已完全展开节点中平衡探索与利用；
+ * - Expansion 随机选择一个尚未展开的合法动作；
+ * - Simulation 在临时 War 上随机执行动作直到结束或超时；
+ * - Back-propagation 把相对根节点评分是否提高作为胜负信号回传。
+ *
+ * 搜索永远操作 War 副本，返回的是从根到最佳终局节点的路径。多线程模式按根动作分片，
+ * 每个任务拥有独立根分支，避免多个线程同时写同一 War；最终按路径末端评分选优。
+ *
+ * @param maxDepth Selection 阶段允许向下遍历的最大层数。
  * @author 肖嘉威
  * @date 2025/1/10 10:04
  */
-const val MCTS_DEFAULT_DEPTH = 10
-
 class MonteCarloTreeSearch(val maxDepth: Int = MCTS_DEFAULT_DEPTH) {
 
+    /** 从根开始重复选择 UCB 最大的子节点，直到遇到可扩展节点、叶子、深度或时间上限。 */
     private fun select(rootNode: MonteCarloTreeNode, endTime: Long): MonteCarloTreeNode {
         var node: MonteCarloTreeNode = rootNode
         var maxUCB = Int.MIN_VALUE.toDouble()
@@ -47,6 +60,7 @@ class MonteCarloTreeSearch(val maxDepth: Int = MCTS_DEFAULT_DEPTH) {
         return node
     }
 
+    /** 随机展开一个未访问动作；节点已完全展开时返回 `null`。 */
     private fun expand(node: MonteCarloTreeNode): MonteCarloTreeNode? {
         var nextNode: MonteCarloTreeNode? = null
         if (!node.isFullExpanded()) {
@@ -57,6 +71,10 @@ class MonteCarloTreeSearch(val maxDepth: Int = MCTS_DEFAULT_DEPTH) {
         return nextNode
     }
 
+    /**
+     * 从给定节点随机走到终局/超时，并比较叶子评分与本任务根评分。
+     * 第一动作复制 War，后续动作复用该模拟分支，减少深层 rollout 的复制成本。
+     */
     private fun simulate(node: MonteCarloTreeNode, rootNode: MonteCarloTreeNode, endTime: Long): Boolean {
         var tempNode = node
         var isFirstTempNode = true
@@ -75,6 +93,7 @@ class MonteCarloTreeSearch(val maxDepth: Int = MCTS_DEFAULT_DEPTH) {
         return score > rootNode.state.score
     }
 
+    /** 将 rollout 结果沿 parent 链回传到任务根；`null` 沿用节点上一次结果。 */
     private fun backPropagation(node: MonteCarloTreeNode, win: Boolean?) {
         var tempNode: MonteCarloTreeNode? = node
         while (tempNode != null) {
@@ -83,6 +102,10 @@ class MonteCarloTreeSearch(val maxDepth: Int = MCTS_DEFAULT_DEPTH) {
         }
     }
 
+    /**
+     * 在已生成树中找到评分最高的终局节点，再反向构造根到终局的动作路径。
+     * 当前实现按模型评分选终局，而不是按访问次数或 UCB 直接选根子节点。
+     */
     private fun buildBest(rootNode: MonteCarloTreeNode): MutableList<MonteCarloTreeNode> {
         val result = mutableListOf<MonteCarloTreeNode>()
 
@@ -137,6 +160,12 @@ class MonteCarloTreeSearch(val maxDepth: Int = MCTS_DEFAULT_DEPTH) {
         return result
     }
 
+    /**
+     * 在 [MCTSArg.endMillisTime] 与迭代预算内搜索最佳动作路径。
+     *
+     * 对手手牌属于未知信息，当前实现先从克隆战局中清空；这是一种保守近似，并非完整
+     * 信息集搜索。等待并行任务时同样受总时间预算限制，超时后返回已收集到的最佳结果。
+     */
     fun searchBestNode(
         war: War, arg: MCTSArg
     ): MutableList<MonteCarloTreeNode> {

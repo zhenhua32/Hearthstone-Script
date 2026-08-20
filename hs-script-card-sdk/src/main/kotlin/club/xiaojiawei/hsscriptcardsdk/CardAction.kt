@@ -22,10 +22,24 @@ private const val MAX_ERROR_LOG_COUNT = 100L
 
 private val errorLogCount = AtomicLong()
 
+/**
+ * 一种卡牌/英雄/技能的行为定义，同时承载“真实点击”和“模型模拟”两条执行路径。
+ *
+ * - `exec*` 抽象方法由应用层公共动作实现，负责鼠标、窗口和真实客户端交互；
+ * - `generate*Actions` 返回的 Action 同时包含真实执行函数与对 [War] 副本的 simulate 函数；
+ * - MCTS 只能调用 simulate，最终选中的动作序列才允许调用真实执行函数。
+ *
+ * [belongCard] 会在动作绑定到实体时设置。模拟中不能直接捕获并修改原始 War/Card，必须
+ * 通过 entityId 调用 [findSelf] 在传入的新 War 中重新定位实体，否则搜索分支会互相污染。
+ *
+ * @param createDefaultAction 是否创建公共动作代理；应用层普通卡牌通常开启，公共动作自身关闭。
+ * @param common 是否为应用层提供的通用动作实现。
+ */
 abstract class CardAction(
     createDefaultAction: Boolean = true,
     val common: Boolean = false,
 ) {
+    /** 连续短动作的嵌套深度，用于控制点击后的等待节奏，并同步给公共动作代理。 */
     protected var depth = 0
         set(value) {
             field = value
@@ -37,6 +51,7 @@ abstract class CardAction(
      */
     var executedPower = false
 
+    /** 默认鼠标实现；插件只覆写特殊效果时，其余真实操作委托给该对象。 */
     protected var commonAction: CardAction? = null
 
     /**
@@ -367,7 +382,8 @@ abstract class CardAction(
     }
 
     /**
-     * 根据卡牌信息自动使用卡牌
+     * 根据 CardInfo 中的目标规则自动选择无目标或指向动作。
+     * 这是实际 UI 操作入口，不会更新模拟 War；策略模拟应使用 generate*Actions。
      */
     fun autoPower(cardInfo: CardInfo? = null) {
         cardInfo ?: let {
@@ -708,6 +724,7 @@ abstract class CardAction(
         }
     }
 
+    /** 以下 `exec*` 只负责真实客户端操作，返回值表示点击/拖动是否成功发出。 */
     protected abstract fun execPower(): Boolean
 
     protected abstract fun execPower(card: Card): Boolean
@@ -760,6 +777,10 @@ abstract class CardAction(
      */
     protected abstract fun execForge(): Boolean
 
+    /**
+     * 为新的 Card 实体创建独立动作实例。
+     * 不应直接返回已绑定过 belongCard 的可变单例，否则不同实体会共享执行状态。
+     */
     abstract fun createNewInstance(): CardAction
 
     /**
@@ -775,6 +796,10 @@ abstract class CardAction(
         var commonActionFactory: Supplier<CardAction>? = null
     }
 
+    /**
+     * 插件动作的便利基类：未覆写的真实操作全部转发到 [commonAction]。
+     * 子类通常只需声明 CardID、特殊模拟效果和必要的区域/回合触发器。
+     */
     abstract class DefaultCardAction : CardAction() {
         override fun execPower(): Boolean = commonAction?.execPower() == true
 

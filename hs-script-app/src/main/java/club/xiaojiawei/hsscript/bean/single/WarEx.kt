@@ -19,13 +19,24 @@ import javafx.beans.property.SimpleIntegerProperty
 import kotlin.math.min
 
 /**
+ * [WAR] 的应用层生命周期与统计扩展。
+ *
+ * SDK 中的 War 只描述一局战斗的可模拟状态；本对象额外负责真实对局的开始/结束、
+ * JavaFX 统计属性、经验估算、胜负连胜，以及需要随对局清理的应用级缓存回调。
+ * 所有改变对局边界的方法都使用 [Synchronized]，避免日志线程和统计/UI 线程同时重置模型。
+ *
+ * `reset -> startWar -> endWar` 是推荐调用顺序。结束后会清理动态生成的 CardAction 工厂缓存，
+ * 防止上一局按 cardId 生成的动作持有旧 Card/War 引用。
+ *
  * @author 肖嘉威
  * @date 2024/10/11 14:41
  */
 object WarEx {
 
+    /** 需要在 WAR 重建后重新初始化自身状态的扩展回调。 */
     private val resetCallbackList: MutableList<Runnable> = ArrayList()
 
+    /** 需要在胜负、时长和经验统计完成后执行的扩展回调。 */
     private val endCallbackList: MutableList<Runnable> = ArrayList()
 
     val war = WAR
@@ -101,6 +112,7 @@ object WarEx {
         set(value) = hangingEXPProperty.set(value)
 
 
+    /** 仅清空跨对局累计统计，不改变当前 WAR 实体和阶段。 */
     @Synchronized
     fun resetStatistics() {
         warCount = 0
@@ -110,6 +122,12 @@ object WarEx {
         hangingEXP = 0
     }
 
+    /**
+     * 重建一局对战的全部可变状态。
+     *
+     * Player 必须重新创建并绑定当前 War；不能复用上一局 Area，否则 Card 的归属关系会串局。
+     * @param print 是否输出重置日志；[startWar] 内部调用时关闭，避免重复提示。
+     */
     @Synchronized
     fun reset(print: Boolean = true) {
         war.run {
@@ -158,6 +176,9 @@ object WarEx {
         endCallbackList.add(runnable)
     }
 
+    /**
+     * 建立新对局边界：先静默重置，再记录开始时间、运行模式并标记正在对局。
+     */
     @Synchronized
     fun startWar(runModeEnum: RunModeEnum?) {
         log.info { "当前模式: ${DeckStrategyManager.currentRunMode?.comment}, 当前策略: ${DeckStrategyManager.currentDeckStrategy?.name()}" }
@@ -169,6 +190,12 @@ object WarEx {
         inWar = true
     }
 
+    /**
+     * 完成对局统计并释放局内缓存。
+     *
+     * 经验值按模式、胜负和最多 30 分钟估算；它用于挂机统计，并不是服务端权威结算值。
+     * 所有 end callback 在 `warCount` 增加前执行，回调可读取本局完整结果。
+     */
     @Synchronized
     fun endWar() {
         inWar = false
@@ -228,6 +255,7 @@ object WarEx {
         }
     }
 
+    /** 按日志中的 playerId 获取本局玩家，无法匹配时返回哨兵对象而不是 `null`。 */
     @Synchronized
     fun getPlayer(playerId: String): Player {
         return war.run {
@@ -239,6 +267,7 @@ object WarEx {
         }
     }
 
+    /** 按游戏显示 ID 获取玩家，无法匹配时返回 [Player.UNKNOWN_PLAYER]。 */
     @Synchronized
     fun getPlayerByGameId(gameId: String): Player {
         return war.run {
@@ -250,6 +279,10 @@ object WarEx {
         }
     }
 
+    /**
+     * 返回同类型的对手区域，用于把一个 Area 上的效果映射到另一名玩家。
+     * 不属于 player1/player2 或尚未支持的 Area 类型返回 `null`。
+     */
     @Synchronized
     fun getReverseArea(area: Area): Area? {
         return war.run {

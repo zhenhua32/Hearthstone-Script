@@ -13,7 +13,10 @@ import (
 	"strings"
 )
 
-// SUBSET_RULE
+// Card 是 HearthstoneJSON 卡牌对象在本地索引中需要保存的字段子集。
+//
+// mechanics、races 在上游 JSON 中是数组，写入 SQLite 前会被压缩成逗号分隔的文本；
+// CardId 对应 JSON 的 id，也是 cards 表执行 INSERT OR REPLACE 时使用的业务唯一键。
 type Card struct {
 	Artist      string   `json:"artist"`
 	Attack      int      `json:"attack"`
@@ -35,6 +38,8 @@ type Card struct {
 	Races       []string `json:"races"`
 }
 
+// findFirst 返回第一个满足条件的元素；未找到时返回 T 的零值。
+// 命令行解析依赖这一零值语义，把空字符串视为“未显式传参”。
 func findFirst[T any](arr []T, f func(T) bool) T {
 	var result T
 	for _, v := range arr {
@@ -52,7 +57,10 @@ const (
 	proxyAddressArg = "--proxyAddress="
 )
 
-// Hearthstone\Data\Win\unity3d.unity3d
+// main 解析三个可选参数，下载卡牌全集并刷新本地 SQLite 索引。
+//
+// 默认读取 HearthstoneJSON 最新简体中文数据。下载响应体的关闭权由 main 持有，
+// updateDB 只消费流，不负责关闭网络连接。
 func main() {
 	args := os.Args
 
@@ -100,8 +108,13 @@ func main() {
 
 }
 
+// updateDB 以流式方式把 JSON 数组写入 cards 表。
+//
+// 使用 json.Decoder 而不是一次性反序列化整个文件，避免卡牌全集随版本增长后占用过多内存。
+// 表以 cardId 为唯一键，因此重复执行会刷新已有卡牌并保留数据库文件本身。当前实现逐条提交，
+// 任意一条解析或写入失败都会终止进程，调用者可以据此判断本次索引更新未完整结束。
 func updateDB(dbPath string, jsonIO io.ReadCloser) {
-	// 打开 SQLite 数据库
+	// sql.Open 只创建连接句柄；后续建表/Prepare 才会实际验证文件是否可访问。
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatalf("Error opening SQLite database: %v", err)
@@ -113,7 +126,7 @@ func updateDB(dbPath string, jsonIO io.ReadCloser) {
 		}
 	}(db)
 
-	// 创建表
+	// CREATE IF NOT EXISTS 允许首次创建和增量刷新共用同一条执行路径。
 	createTableQuery := `CREATE TABLE IF NOT EXISTS cards (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		cardId TEXT UNIQUE,
@@ -139,7 +152,7 @@ func updateDB(dbPath string, jsonIO io.ReadCloser) {
 		log.Fatalf("Error creating table: %v", err)
 	}
 
-	// 准备插入或替换语句
+	// 复用预编译语句，避免为卡牌全集中的每个对象重复解析 SQL。
 	insertOrReplaceQuery := `INSERT OR REPLACE INTO cards (cardId, artist, attack, health, cardClass, cost, dbfId, flavor, isMiniSet, name, rarity, cardSet, spellSchool, text, type, mechanics, race, races)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	stmt, err := db.Prepare(insertOrReplaceQuery)
@@ -154,7 +167,7 @@ func updateDB(dbPath string, jsonIO io.ReadCloser) {
 	}(stmt)
 
 	decoder := json.NewDecoder(jsonIO)
-	// Read the opening bracket
+	// 先消费数组起始标记 '['，随后 More 会逐个判断是否还有卡牌对象。
 	if _, err := decoder.Token(); err != nil {
 		log.Fatalf("Error reading JSON: %v", err)
 	}
@@ -167,7 +180,7 @@ func updateDB(dbPath string, jsonIO io.ReadCloser) {
 			log.Fatalf("Error decoding JSON: %v", err)
 		}
 
-		// Convert slices to comma-separated strings for SQLite
+		// SQLite 表没有数组列；这里采用项目查询端约定的逗号分隔格式。
 		mechanics := strings.Join(card.Mechanics, ",")
 		races := strings.Join(card.Races, ",")
 
@@ -180,7 +193,7 @@ func updateDB(dbPath string, jsonIO io.ReadCloser) {
 	}
 	progress.CancelPrintLoadingBar()
 
-	// Read the closing bracket
+	// 消费数组结束标记 ']'，同时验证输入没有在最后一个对象后被截断。
 	if _, err := decoder.Token(); err != nil {
 		log.Fatalf("Error reading JSON: %v", err)
 	}

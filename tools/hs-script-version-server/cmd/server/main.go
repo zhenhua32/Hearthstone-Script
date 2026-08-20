@@ -14,6 +14,11 @@ import (
 
 const version = "1.0.0"
 
+// main 启动一个只依赖本地 releases 目录的轻量版本服务。
+//
+// API 路径刻意兼容项目客户端使用的 GitHub Releases 形式：元数据由 FileStorage 提供，
+// 更新包由下载路由直接返回。domain 只参与生成对外 URL 和启动日志，不决定监听网卡；
+// 实际监听地址始终由 port 组成。
 func main() {
 	// 命令行参数
 	var (
@@ -48,24 +53,23 @@ func main() {
 		log.Fatalf("Failed to create releases directory: %v", err)
 	}
 
-	// 初始化存储
+	// 存储层负责 releases.json 与目录扫描之间的回退，不让 HTTP 层感知文件布局细节。
 	store := storage.NewFileStorage(absReleasesDir)
 
 	// 初始化处理器
 	h := handler.NewHandler(store, absReleasesDir, *domain, *userName, *projectName)
 
-	// 注册路由
-	// GitHub 风格 API
+	// GitHub 风格 API；user/project 同时构成路由命名空间，避免与其他项目冲突。
 	http.HandleFunc("/repos/"+*userName+"/"+*projectName+"/releases/latest", h.HandleLatestRelease)
 	http.HandleFunc("/repos/"+*userName+"/"+*projectName+"/releases", h.HandleAllReleases)
 
-	// 下载路由
+	// 下载路由直接从 releases 目录提供发行包，不经过 JSON 存储层。
 	http.HandleFunc("/"+*userName+"/"+*projectName+"/releases/download/", h.HandleDownload)
 
 	// 健康检查
 	http.HandleFunc("/health", h.HandleHealth)
 
-	// 静态文件服务（可选）
+	// 静态路由主要用于部署检查；客户端正常更新使用上面的 releases/download 路由。
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(absReleasesDir))))
 
 	// 启动服务器
